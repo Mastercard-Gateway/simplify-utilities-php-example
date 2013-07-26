@@ -27,43 +27,138 @@ $simplified = array(
 
 $simplified['title']        = '';
 $simplified['description']  = '';
-$simplified['company']      = '';
-$simplified['amount']       = '';
+$simplified['company']      = 'Your Company';
+$simplified['amount']       = '999';
 
 /* DONE! */
 
-require_once('simplifycommerce-sdk-php/lib/Simplify.php');
+session_start();
 
-Simplify::$publicKey = $simplified['publicKey'];
-Simplify::$privateKey = $simplified['privateKey'];
+// URL Rerouting (Variable Transaction Amount)
+$protocol = 'http'.(!empty($_SERVER['HTTPS']) ? 's' : '');
+$root = $protocol.'://'.$_SERVER['SERVER_NAME'];
+$simplified['url'] = $root . $_SERVER['PHP_SELF'];
+
+if(isset($_REQUEST['amount']) && is_int(intval($_REQUEST['amount'])) && $_REQUEST['amount'] >= 51) {
+    if($_GET['amount']) {
+        $_SESSION['amount'] = $_REQUEST['amount'];
+        header('Location: ' . $simplified['url']);
+        die();
+    }
+} elseif($_SESSION['amount']) {
+    $simplified['amount'] = $_SESSION['amount'];
+}
 
 // Check API Keys & Their Prefixes
 // Determine Environment
 if(!empty($simplified['publicKey']) || !empty($simplified['privateKey'])) {
+
     $publicKeyPrefix = substr($simplified['publicKey'], 0, 2);
     $privateKeyPrefix = substr($simplified['privateKey'], 0, 2);
-    if($publicKeyPrefix == 'sb') {
-        $simplified['mode'] = 'sandbox';
-    } else {
-        $simplified['mode'] = 'live';
+    
+    require_once('simplifycommerce-sdk-php/lib/Simplify.php');
+
+    Simplify::$publicKey = $simplified['publicKey'];
+    Simplify::$privateKey = $simplified['privateKey'];
+
+    $simplified['errorHandling'] = array(
+        'system' => 'System error occurred processing a request.',
+        'no.payment.details' => 'No token, card or customer details in payment request.',
+        'expYear.expired' => 'The card expiry year is invalid.',
+        'expMonth.expired' => 'The card expiry month is invalid.',
+        'card.invalid' => 'The supplied card is invalid.',
+        'card.expired' => 'The card has expired.',
+        'object.not.found' => 'Not Found.',
+        'operation.not.allowed' => 'Operation Not Allowed.',
+        'user.not.authorized' => 'User not authorized.',
+        'service.unavailable' => 'The service you requested is currently unavailable.',
+        'auth.bad.jws' => 'JWS encoding of request message is invalid or missing.',
+        'auth.bad.algol' => 'Invalid JWS algorithm used in request message.',
+        'auth.bad.kid' => 'Invalid or missing public key in request message.',
+        'auth.bad.uri' => 'Invalid or missing URI in JWS request message.',
+        'auth.bad.timestamp' => 'Invalid or missing timestamp in JWS request message.',
+        'auth.bad.nonce' => 'Invalid of missing nonce in JWS request message.',
+        'auth.invalid.keys' => 'Invalid or missing API keys.',
+        'auth.bad.sig' => 'Cannot verify JWS signature in request message.',
+        'auth.invalid.account.mode' => 'The account you are using is only in test mode.  You can activate your account in the Dashboard.',
+        'auth.invalid.token' => 'Card token is invalid.',
+        'validation' => 'Request data is invalid.',
+        'invoice.item.paid' => 'Unable to complete action as the invoice is already paid.',
+        'coupon.does.not.exist' => 'Coupon not found.',
+        'plan.not.found' => 'Subscription plan not found.',
+        'coupon.expired' => 'Coupon has expired.',
+        'coupon.not.active' => '.',
+        'analytic.data.invalid' => 'Analytic paramters invalid.',
+        'refund.insufficient.balance' => 'The amount you are trying to refund is greater than the remaining balance.',
+        'criteria.invalid' => 'Invalid arguments in criteria.'
+    );
+
+    try {
+        $webhook = Simplify_Webhook::listWebhook();
+        if($webhook) {
+            if($publicKeyPrefix == 'sb') {
+                $simplified['mode'] = 'sandbox';
+            } elseif($publicKeyPrefix == 'lv') {
+                $simplified['mode'] = 'live';
+            }
+            if($_POST) {
+                try {
+                 
+                    $payment = Simplify_Payment::createPayment(array(
+                        "token" => $_POST['simplifyToken'],
+                        "currency" => "USD",
+                        "amount" => $_POST['amountInt'],
+                        "description" => $_POST['description']
+                    ));
+
+                    if($payment) {
+                        if($payment->paymentStatus == 'APPROVED') {
+                            $simplified['success'] = 'Your payment has been approved.';
+                            $_SESSION['amount'] = null;
+                            session_destroy();
+                        } else {
+                            $simplified['error'] = 'Your payment was not approved: ' . $payment->paymentStatus;
+                        }
+                    } else {
+                        $simplified['error'] = 'There was an unexpected error.';
+                    }
+                 
+                } catch (Simplify_ApiException $e) {
+                    if ($e instanceof Simplify_BadRequestException && $e->hasFieldErrors()) {
+                        foreach ($e->getFieldErrors() as $fieldError) {
+                            if(!empty($simplified['errorHandling'][$fieldError->getErrorCode()])) {
+                                $simplified['error'] .= $simplified['errorHandling'][$fieldError->getErrorCode()];
+                            }
+                        }
+                        if(empty($simplified['error'])) $simplified['error'] = 'There was an unexpected error processing your payment.';
+                    } else {
+                        $simplified['error'] = 'There was an error processing your payment.';
+                    }
+
+                    if($simplified['mode'] == 'sandbox') {
+                        $simplified['debug'] = "Reference:   " . $e->getReference() . "\n";
+                        $simplified['debug'] .= "Message:     " . $e->getMessage() . "\n";
+                        $simplified['debug'] .= "Error code:  " . $e->getErrorCode() . "\n";
+                        if ($e instanceof Simplify_BadRequestException && $e->hasFieldErrors()) {
+                            foreach ($e->getFieldErrors() as $fieldError) {
+                                $simplified['debug'] .= $fieldError->getFieldName()
+                                    . ": '" . $fieldError->getMessage()
+                                    . "' (" . $fieldError->getErrorCode()
+                                    . ")\n";
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            $simplified['mode'] = 'invalid';
+        }
+    } catch (Simplify_ApiException $e) {
+        $simplified['mode'] = 'invalid';
     }
+
 } else {
     $simplified['mode'] = 'setup';
-}
-
-if($_POST) {
-    if(empty($simplified['amount'])) $simplified['amount'] = '1000';
-    $payment = Simplify_Payment::createPayment(array(
-        'amount' => $simplified['amount'],
-        'token' => $_POST['simplifyToken'],
-        'description' => $_POST['description'],
-        'currency' => 'USD'
-    ));
-    if($payment->paymentStatus == 'APPROVED') {
-        $simplified['success'] = 'Your payment has been approved.';
-    } else {
-        $simplified['error'] = 'Your payment was not approved.';
-    }
 }
 ?>
 <!DOCTYPE html>
@@ -389,8 +484,12 @@ if($_POST) {
                             <span class="label label-success">LIVE</span>
                             <?php } elseif($simplified['mode'] == 'sandbox') { ?>
                             <span class="label label-important">SANDBOX</span>
-                            <?php } elseif($simplified['mode'] == 'setup') { ?>
+                            <?php } elseif($simplified['mode'] == 'invalid') { ?>
                             <span class="label label-warning">INVALID API KEYS</span>
+                            <?php } elseif($simplified['mode'] == 'setup') { ?>
+                                <a href="https://www.simplify.com/commerce/app#/account/apiKeys" target="_blank">
+                                    <span class="label label-inverse">GET API KEYS <i class="icon-circle-arrow-right"></i></span>
+                                </a>
                             <?php } ?>
                         </div>
                         <div class="pull-left">
@@ -403,20 +502,44 @@ if($_POST) {
             </div>
             <div class="container">
                 <div id="top">
+                    <?php if(!empty($simplified['debug']) && $simplified['mode'] == 'sandbox') { ?>
+                        <div class="well well-small" style=" padding: 10px;font-size: 10px; background: #333; color: #000; text-shadow: 0px 1px 0px #000;">
+                            <h2 style="color: #fff;"><i class="icon-bug icon-4x" style="color: #000; float: right; margin-top: -40px;"></i> DEBUG <small>Live Exception Handling Console <em>for Developers</em></small></h2>
+                            <pre style="background: #000;"><code style="color: #eee;"><?php echo $simplified['debug']; ?></code></pre>
+                            <div style="text-align: right; color: #eee;"><small style="font-style: italic;">Enter a live API key to remove debugging information from this application.</small></div>
+                        </div>
+                    <?php } ?>
                     <div class="row">
                         <div class="span4 offset2">
                             <div id="form">
+                                <?php if($simplified['amount']) { ?>
+                                <div id="amount">
+                                    <div class="text-center">
+                                        <h5 style="display: inline;"><div style="display: inline-block; line-height: 40px;"><small style="position: relative; top: -10px; left: -5px;">pay:</small></div></h5><br class="hidden-desktop" />
+                                        <h1 style="display: inline;">
+                                            $&nbsp;<span id="dollarAmount"><?php echo substr($simplified['amount'], 0, -2) . "." . substr($simplified['amount'], -2); ?></span>
+                                        </h1>
+                                    </div><br class="hidden-desktop" />
+                                    <div class="text-center" id="wide">
+                                            <h5 style="display: inline;"><small>to the order of:</small></h5><br class="hidden-desktop" />
+                                            <h5 style="display: inline;">
+                                                <?php echo $simplified['company']; ?>
+                                            </h5>
+                                    </div>
+                                </div><br/>
+                                <?php } ?>
                                 <form id="simplify-payment-form" action="" method="POST">
-                                    <?php if(!empty($simplified['success'])) { ?>
-                                        <div class="alert alert-success" style="font-size: 10px;">
-                                            <i class="icon-check" style="color: #000;"></i> <strong>Thanks!</strong> <?php echo $simplified['success']; ?>
-                                        </div>
-                                    <?php } elseif(!empty($simplified['error'])) { ?>
-                                        <div class="alert alert-error" style="font-size: 10px;">
-                                            <i class="icon-warning-sign" style="color: #000;"></i> <strong>Sorry!</strong> <?php echo $simplified['success']; ?>
-                                        </div>
-                                    <?php } ?>
-                                    <div id="simplify-response"></div>
+                                    <div id="simplify-response">
+                                        <?php if(!empty($simplified['success'])) { ?>
+                                            <div class="alert alert-success" style="font-size: 10px;">
+                                                <span class="label label-success"><i class="icon-check" style="color: #fff;"></i> <strong>Thanks!</strong></span> <?php echo $simplified['success']; ?>
+                                            </div>
+                                        <?php } elseif(!empty($simplified['error'])) { ?>
+                                            <div class="alert alert-error" style="font-size: 10px;">
+                                                <span class="label label-important"><i class="icon-warning-sign" style="color: #fff;"></i> <strong>Sorry!</strong></span> <?php echo $simplified['error']; ?>
+                                            </div>
+                                        <?php } ?>
+                                    </div>
                                     <div class="row-fluid">
                                         <div class="span9 mobile-three">
                                             <input class="input-block-level" id="cc-number" type="tel" maxlength="20" autocomplete="off" placeholder="Card Number" value="" autofocus />
@@ -462,6 +585,7 @@ if($_POST) {
                                             <input class="input-block-level" id="description" name="description" type="text" maxlength="140" autocomplete="off" placeholder="Add a short description..." style="background: #EEE;" value="" />
                                         </div>
                                     </div>
+                                    <input id="amountInt" name="amountInt" type="hidden" maxlength="140" autocomplete="off" value="<?php echo intval($simplified['amount']); ?>" />
                                     <button class="input-block-level btn btn-medium" id="process-payment-btn" type="submit"><i class="icon-credit-card"></i> Pay</button>
                                 </form>
                                 <div class="brand-marks"></div>
@@ -522,7 +646,7 @@ if($_POST) {
                             <div id="gettingStartedWrapper">
                                 <ol>
                                     <li>
-                                        <p class="lead">Copy your API keys from <a href="https://www.simplify.com/commerce/app#/account/apiKeys">Simplify.com <i class="icon-external-link"></i></a></p>
+                                        <p class="lead">Copy your API keys from <a href="https://www.simplify.com/commerce/app#/account/apiKeys" target="_blank">Simplify.com <i class="icon-external-link"></i></a></p>
                                         <small>Make sure you use your <em>sandbox</em> keys!</small><br/><br/>
                                     </li>
                                     <li>
@@ -531,6 +655,9 @@ if($_POST) {
                                     <li>
                                         <p class="lead">Paste the keys between the quotes:</p>
                                         <pre class="prettyprint" style="font-size: 10px;"><span class="tag">&lt;?php</span><br/>$simplified = array(<br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'publicKey' => 'YOUR_PUBLIC_KEY',<br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'privateKey' => 'YOUR_PRIVATE_KEY'<br/>);<br/>// That's it, Simplify, simplified.</pre>
+                                        <div class="alert alert-info">
+                                            <strong>Tip:</strong> Add #9999 to the end of the URL to make even more money! <a href="#9999" style="color: #3A87AD; text-decoration: underline;">Dont be shy - give it a try <i class="icon-circle-arrow-right" style="color: #3A87AD;"></i></a><br/><small>(...not really, but you can certainly charge more!)</small>
+                                        </div>
                                     </li>
                                 </ol>
                             </div><!-- /gettingStarted -->
@@ -747,15 +874,15 @@ if($_POST) {
         <script type="text/javascript">
             function simplifyResponseHandler(data) {
                 var $response = $("#simplify-response");
-                // Remove all previous errors
-                $response.html('');
                 // Check for errors
                 if (data.error) {
+                    // Remove all previous errors
+                    $response.html('');
                     // Show any validation errors
                     if (data.error.code == "validation") {
                         var fieldErrors = data.error.fieldErrors,
                         fieldErrorsLength = fieldErrors.length,
-                        errorList = '<div class="alert alert-error" style="font-size: 10px;"><i class="icon-warning-sign"></i> <strong>Error</strong>';
+                        errorList = '<div class="alert alert-error" style="font-size: 10px;"><span class="label label-important"><i class="icon-warning-sign" style="color: #fff;"></i> <strong>Sorry!</strong></span>';
                         for (var i = 0; i < fieldErrorsLength; i++) {
                             if(i == 0) {
                                 if(fieldErrors[i].field == 'card.number') {
@@ -782,8 +909,28 @@ if($_POST) {
                     $('form').get(0).submit();
                 }
             }
+
             $(document).ready(function() {
+
+                // Client-side URL rereouting for variable amounts
+                function hashCheck() {
+                    if(location.hash && location.hash != '' && location.hash != '#') {
+                        var preDollarAmount = location.hash.substring(1);
+                        $("#amountInt").val(parseInt(preDollarAmount));
+                        var preDecimalAmount = preDollarAmount.substring(0, preDollarAmount.length-2);
+                        var postDecimalAmount = preDollarAmount.substring(preDollarAmount.length-2, preDollarAmount.length);
+                        $("#dollarAmount").html(parseInt(preDecimalAmount) + "." + parseInt(postDecimalAmount));
+                    }
+                }
+                hashCheck();
+                $(window).on('hashchange', function() {
+                    hashCheck();
+                });
+
                 $("#simplify-payment-form").on("submit", function() {
+                    // Display processing alert box within the response
+                    var $response = $("#simplify-response");
+                    $response.html('<div class="alert alert-warning" style="font-size: 10px;"><span class="label label-warning"><i class="icon-credit-card" style="color: #fff;"></i> Processing...</span> Just a moment, please.</div>');
                     // Disable the submit button
                     $("#process-payment-btn").attr("disabled", "disabled");
                     // Generate a card token & handle the response
